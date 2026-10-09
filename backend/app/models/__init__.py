@@ -16,6 +16,19 @@ from app.models.attendance import (
 from app.models.audit import AuditLog
 from app.models.auth import AuthSession, LoginAttempt, OtpChallenge, RefreshToken
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.exams import (
+    Exam,
+    ExamMark,
+    ExamMarkChange,
+    ExamPublication,
+    ExamReportCard,
+    ExamResult,
+    ExamStatus,
+    ExamSubject,
+    ExamType,
+    MarkStatus,
+    PublicationStatus,
+)
 from app.models.faculty import AssignmentStatus, Faculty, FacultyAssignment, FacultyStatus
 from app.models.people import (
     EnrollmentStatus,
@@ -41,13 +54,24 @@ __all__ = [
     "AuthSession",
     "Base",
     "EnrollmentStatus",
+    "Exam",
+    "ExamMark",
+    "ExamMarkChange",
+    "ExamPublication",
+    "ExamReportCard",
+    "ExamResult",
+    "ExamStatus",
+    "ExamSubject",
+    "ExamType",
     "Faculty",
     "FacultyAssignment",
     "FacultyStatus",
     "LoginAttempt",
+    "MarkStatus",
     "OtpChallenge",
     "Parent",
     "Permission",
+    "PublicationStatus",
     "RefreshToken",
     "RelationshipType",
     "Role",

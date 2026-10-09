@@ -6,6 +6,7 @@ from app.api.v1 import (
     auth,
     classes,
     enrollments,
+    exams,
     faculty,
     faculty_assignments,
     health,
@@ -34,3 +35,4 @@ api_router.include_router(enrollments.router)
 api_router.include_router(faculty.router)
 api_router.include_router(faculty_assignments.router)
 api_router.include_router(attendance.router)
+api_router.include_router(exams.router)

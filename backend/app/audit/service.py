@@ -90,6 +90,20 @@ class AuditAction(StrEnum):
     ATTENDANCE_RECORD_BULK_CREATED = "attendance_record.bulk_created"
     ATTENDANCE_RECORD_UPDATED = "attendance_record.updated"
     ATTENDANCE_RECORD_CORRECTED = "attendance_record.corrected"
+    EXAM_CREATED = "exam.created"
+    EXAM_UPDATED = "exam.updated"
+    EXAM_SCHEDULED = "exam.scheduled"
+    EXAM_RETURNED_TO_DRAFT = "exam.returned_to_draft"
+    EXAM_MARKS_ENTRY_OPENED = "exam.marks_entry_opened"
+    EXAM_CANCELLED = "exam.cancelled"
+    EXAM_PUBLISHED = "exam.published"
+    EXAM_REOPENED = "exam.reopened"
+    EXAM_SUBJECT_CREATED = "exam_subject.created"
+    EXAM_SUBJECT_UPDATED = "exam_subject.updated"
+    EXAM_SUBJECT_DELETED = "exam_subject.deleted"
+    EXAM_MARK_CREATED = "exam_mark.created"
+    EXAM_MARK_BULK_CREATED = "exam_mark.bulk_created"
+    EXAM_MARK_CORRECTED = "exam_mark.corrected"
 
 
 class AuditOutcome(StrEnum):

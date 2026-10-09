@@ -2,17 +2,18 @@
 
 Centralized school management platform: parent, student, faculty and management portals.
 
-**Status:** Phase 6 complete — attendance: daily and subject roll-call sessions,
-present/absent/late/excused records, atomic bulk marking, corrections with an append-only
-history, attendance summaries, and the same scoping as the rest of the platform (faculty
-through their assignments, parents through linked children, students to themselves, staff
-to their school). It builds on Phase 5 (faculty and assignments), Phase 4 (students,
+**Status:** Phase 7 complete — examinations: exams per class or section with a
+draft → scheduled → marks entry → published lifecycle, subject components with their own
+maximum and passing marks, faculty-scoped single and atomic bulk marks entry, corrections
+with an append-only history, deterministic result calculation, and report cards frozen as
+versioned publication snapshots that parents and students see only once published. It
+builds on Phase 6 (attendance), Phase 5 (faculty and assignments), Phase 4 (students,
 parents, enrollments), Phase 3 (schools, academic structure), Phase 2 (authentication,
 RBAC, audit) and Phase 1 (FastAPI, PostgreSQL, Alembic, Docker, tests).
 
-> **Phase 7 (exams and marks) has NOT started.** Not implemented yet: exams, marks, report
-> cards, assignments/submissions, timetable, announcements, notifications, fees, reports
-> (beyond attendance summaries), AI and the frontend portals.
+> **Phase 8 (assignments) has NOT started.** Not implemented yet: assignments/submissions,
+> timetable, announcements, notifications, fees, reports and dashboards (beyond attendance
+> summaries and exam report cards), PDF report cards, AI and the frontend portals.
 
 ## Architecture
 
@@ -36,24 +37,30 @@ backend/
                        (require_permission / require_role)
     api/v1/            versioned routers: health, auth, roles, users, school,
                        academic_years, classes, sections, subjects, students,
-                       parents, enrollments, faculty, faculty_assignments
+                       parents, enrollments, faculty, faculty_assignments,
+                       attendance, exams
     core/              cross-cutting infrastructure: logging, errors, middleware,
                        request context (IP / user agent / request id)
     models/            ORM models: users, RBAC, auth sessions/tokens/OTP, audit log,
                        schools, academic years, classes, sections, subjects,
                        students, parents, student_parents, student_enrollments,
-                       faculty, faculty_assignments
+                       faculty, faculty_assignments, attendance, exams
+                       (exams, exam_subjects, exam_marks, exam_mark_changes,
+                       exam_publications, exam_report_cards)
     schemas/           request/response models, shared envelopes
     services/          business logic: auth, OTP sign-in, RBAC, user provisioning,
                        school profile, academic structure, students, parents,
-                       enrollments, faculty and faculty assignments
+                       enrollments, faculty and faculty assignments,
+                       attendance, exams, marks and results (the arithmetic
+                       lives in result_calculation)
     repositories/      data access
     security/          passwords, JWT/refresh tokens, OTP, RBAC catalog,
                        principal, resource-scope framework, school scope,
-                       people scope, faculty scope
+                       people scope, faculty scope, attendance scope, exam scope
     audit/             audit-trail writer with secret redaction
     utils/             small generic helpers
   alembic/             migrations
+  tools/               developer verification tools (E2E, mutation testing)
   tests/unit           no database needed
   tests/integration    real PostgreSQL test database
 ```
@@ -112,15 +119,17 @@ uvicorn app.main:app --reload
 
 ### Test status
 
-891 tests pass (167 of them added in Phase 6) with 99% coverage. Ruff format and lint
+1044 tests pass (153 of them added in Phase 7) with 99% coverage. Ruff format and lint
 are clean and mypy strict reports no issues. Integration tests run against real
 PostgreSQL, including:
 - concurrency tests (`test_concurrency.py`, `test_people_concurrency.py`,
-  `test_faculty_concurrency.py`, `test_attendance_concurrency.py`);
+  `test_faculty_concurrency.py`, `test_attendance_concurrency.py`,
+  `test_exam_concurrency.py`);
 - IDOR tests for parents and students (`test_people_authorization.py`), for faculty
-  (`test_faculty_authorization.py`) and for attendance (`test_attendance_authorization.py`);
+  (`test_faculty_authorization.py`), for attendance (`test_attendance_authorization.py`) and
+  for exams (`test_exam_authorization.py`);
 - raw-SQL constraint tests (`test_*_constraints.py`);
-- migration preservation tests (`test_migration_0003.py` to `test_migration_0006.py`).
+- migration preservation tests (`test_migration_0003.py` to `test_migration_0007.py`).
 
 ### Quality checks (run from `backend/`)
 
@@ -153,6 +162,7 @@ alembic revision --autogenerate -m "describe change"   # review the generated fi
 | `0004_students_parents` | students, parents, student_parents, student_enrollments; `UNIQUE (id, school_id)` on academic_years, sections, subjects and users, plus `UNIQUE (id, class_id)` on sections, as composite-FK targets. Additive only: no existing rows are touched. |
 | `0005_faculty_assignments` | faculty, faculty_assignments, with composite same-school foreign keys and the partial unique index for active assignments. No existing table is modified and no rows are created. |
 | `0006_attendance` | attendance_sessions, attendance_records, attendance_record_changes (+ append-only trigger); `UNIQUE (id, school_id, student_id, academic_year_id, class_id, section_id)` on student_enrollments as a composite-FK target. Additive only: no existing column or row changes, no rows are created. |
+| `0007_examinations_marks` | exams, exam_subjects, exam_marks, exam_mark_changes, exam_publications, exam_report_cards, their composite same-school keys and the lifecycle/append-only triggers. Uses only existing composite-FK targets: no existing table, column or row changes, no rows are created. |
 
 `tests/integration/test_database.py` fails if models and migrations drift apart, and runs
 a full downgrade → upgrade round trip.
@@ -1029,6 +1039,374 @@ only narrow results. Anything outside the scope returns 404, the same as an unkn
   can violate it.
 - Creates no rows. Upgrade → downgrade → re-upgrade preserves Phase 1–5 data (tested).
 
+## Examinations, marks and report cards (Phase 7)
+
+Phase 7 adds exams, their subject components, marks entry, corrections with an
+append-only history, result calculation and published report cards. It reuses the
+existing authentication, RBAC, school scope, Phase 5 faculty assignment scope and Phase 4
+parent/student scope. There is no second authorization system, and **no permission or
+role grant changed**.
+
+### Data model
+
+| Table | Holds |
+|---|---|
+| `exams` | school + academic year + **class**, optional **section** (`NULL` = every section of the class), `name`, `description`, `exam_type` (`unit_test`, `periodic`, `midterm`, `term`, `final`, `practical`, `other`), `start_date`/`end_date`, `status`, optional `pass_percentage` and `grade_bands`, creator, cancellation fields |
+| `exam_subjects` | one component per subject per exam: `max_marks` (> 0, ≤ 1000), optional `pass_marks` (0 … max), optional `assessment_date` (within the exam) and times |
+| `exam_marks` | one student's entry for one component: `status` (`present`/`absent`/`exempt`), `marks_obtained` (only when present), the component's `max_marks`, `remarks`, the enrollment and placement the student held, who entered it and when, and the latest correction (`corrected_by`/`corrected_at`/`correction_reason`) |
+| `exam_mark_changes` | append-only correction history: per-mark `sequence`, previous/new status, marks and remarks, mandatory `reason`, `changed_by`, `changed_at` |
+| `exam_publications` | one publication of an exam's results: `version` (1, 2, …), `status` (`active`/`withdrawn`), `settings` (the frozen exam configuration: names, components, maxima, passing marks, pass percentage, grade bands), who published/withdrew it, when and why |
+| `exam_report_cards` | one student's result frozen at publication: totals, percentage, grade, result and one line per subject |
+
+Marks, maxima and percentages are PostgreSQL `numeric` (marks `numeric(6,2)`), handled as
+Python `Decimal`. Input with more than two decimals is rejected (never rounded), and
+responses carry them as JSON numbers. Snapshot JSON stores decimals as strings, so no
+floating-point value is ever stored.
+
+### Exam lifecycle
+
+```
+draft ──schedule──▶ scheduled ──open-marks-entry──▶ marks_entry ──publish──▶ published
+  ▲                    │                                ▲                       │
+  └──return-to-draft───┘                                └────────reopen─────────┘
+draft / scheduled / marks_entry ──cancel (reason)──▶ cancelled (terminal)
+```
+
+| Status | Exam fields | Subjects | Marks | Visible to parents/students |
+|---|---|---|---|---|
+| `draft` | all | add / change / remove | no | no |
+| `scheduled` (needs ≥ 1 subject) | all | add / change | no | no |
+| `marks_entry` | `pass_percentage`, `grade_bands` only | frozen | enter and correct | no |
+| `published` | read-only | frozen | frozen | the active publication |
+| `cancelled` | read-only | frozen | kept, frozen | no |
+
+- Placement (year, class, section) is immutable. An exam's year, class and section must
+  exist in the school and be active, the section must belong to the class, and the dates
+  must lie inside the academic year.
+- Exam names are unique per (year, class, section or whole class) among non-cancelled
+  exams. A cancelled exam frees its name.
+- One component per subject per exam (theory/practical splits are separate exams for now).
+- Removing a subject (`DELETE`) is allowed only while the exam is **draft** and no mark
+  references it. A scheduled exam must return to draft first, so it can never be left
+  scheduled without subjects; from marks entry onwards configuration is frozen history.
+  This is the only delete in the API. It is audited with the removed values, and it is
+  enforced three times: the service, a trigger (`exam_subjects_removal_draft_only`) and
+  `ON DELETE RESTRICT` from marks. Nothing published or historical can be deleted.
+- Wrong transitions return `409`. A PostgreSQL trigger enforces the same transition table,
+  so a buggy code path or raw SQL cannot skip a state.
+
+### Who may do what
+
+| Role | Configure exams and lifecycle | Enter / correct marks | Publish / reopen | Read |
+|---|:-:|:-:|:-:|---|
+| SUPER_ADMIN (selected school) | ✓ | ✓ | ✓ | everything in the school |
+| SCHOOL_ADMIN | ✓ | ✓ | ✓ | everything in the school |
+| MANAGEMENT | | | ✓ | everything in the school (incl. history and live results) |
+| FACULTY | | within assignments | | exams of their classes; marks within assignments |
+| PARENT | | | | published report cards of linked children |
+| STUDENT | | | | own published report cards |
+
+Permissions used: `marks.manage` (configuration, marks), `marks.publish` (publish, reopen),
+`marks.read` (reads). They already existed with exactly the grants above, so the catalog
+and the migration-seeded matrix are unchanged. Exam **configuration** additionally needs
+school-wide scope: faculty hold `marks.manage` but get `403 "Exams are configured by school
+staff."`. That is the same boundary as daily attendance in Phase 6.
+
+### Marks entry workflow
+
+1. Staff create a draft exam, add subjects, **schedule** it, then **open marks entry**.
+2. Marks are entered per subject, for one student (`POST …/marks`) or many
+   (`POST …/marks/bulk`, up to 200). `GET …/students?unmarked=true` lists eligible students
+   without an entry.
+3. Each entry is `present` (with `marks_obtained`, 0 … the subject's maximum), `absent` or
+   `exempt`. Missing entries stay **pending**: never zero, absent or failed.
+4. Staff review live results (`GET /exams/{id}/results`), then **publish**. Publishing is
+   refused while entries are missing (`422` with counts) unless `allow_incomplete: true`;
+   those report cards say `incomplete`.
+
+**Eligibility.** A student may receive marks for a subject when an enrollment placed them
+in the exam's year and class, and in the exam's section if it names one, **on the
+assessment date**. The assessment date is the subject's `assessment_date`, or the exam's
+`start_date` if none is set. The rule uses the same `enrollment_covers` logic as
+attendance: late joiners only sit later assessments, and a student who moved section is
+placed by the enrollment covering that date. The mark is pinned to that enrollment by a
+composite foreign key.
+
+**Bulk entry** is atomic and create-only. A duplicate student in the request, an
+ineligible or out-of-scope student, marks above the maximum, or an already-entered student
+rejects the whole request (`422`/`409`, with the offending indexes), and nothing is
+written. Existing entries are changed with corrections.
+
+### Faculty authorization
+
+A faculty member enters, corrects and reads marks of a student for a subject only with an
+**effective** Phase 5 assignment for the exam's **year + class + that student's section +
+the subject**. The assignment must be:
+- effective **today** (current authority, as everywhere else); and
+- effective **on the assessment date** (the same rule attendance uses for session dates).
+
+Example: maths in 10-A reaches 10-A students' maths marks only, not physics, 10-B, another
+class, year or school. For a class-wide exam, a teacher of 10-A sees and enters only 10-A's
+students. The scope is a SQL condition (`app.security.exam_scope`) applied inside list,
+detail, eligibility and write queries alike, so filters only narrow. Swapped mark IDs
+return 404. A student outside the teacher's sections gets the same "not eligible" answer
+as an unknown ID.
+
+Faculty see exams of classes/sections they teach, but they never configure or publish
+exams and never read whole report cards. A report card spans every subject, and an
+assignment covers one.
+
+### Parent and student result visibility
+
+Parents read report cards of their linked children, and students their own. This reuses
+`people_scope.personal_student_visibility` (active link to an active parent / own student
+record). They see **only the active publication**. Before publication, after a reopen
+(withdrawal), and for everything else (exams, marks, live results, history, withdrawn
+versions), the answer is an empty list or `404`. Parents and students hold no
+`marks.manage`, so every write returns `403`.
+
+### Corrections and history
+
+- `PATCH /exam-marks/{id}` changes `status`, `marks_obtained` and/or `remarks`. **Every
+  change is a correction and requires `reason`.** Switching to `absent`/`exempt` clears the
+  marks. Switching to `present` requires `marks_obtained`. A no-op returns the mark
+  unchanged and writes no history.
+- Each correction appends a row to `exam_mark_changes` (previous and new status, marks and
+  remarks, reason, who, when, numbered per mark) and updates `corrected_*`. The original
+  value is the first row's `previous_*`. `GET /exam-marks/{id}/history` returns the history
+  in order.
+- Corrections are only possible in `marks_entry`. To correct a published result, reopen
+  it first (below).
+- The database enforces this: `reason` is `NOT NULL` and non-blank,
+  `UNIQUE (mark_id, sequence)` stops two writers both appending change N, and a trigger
+  rejects UPDATE and DELETE of history rows.
+
+### Result calculation
+
+One implementation, `app/services/result_calculation.py`, is used both for the live
+preview and when publishing:
+
+```
+per subject:  present → marks_obtained / max_marks        absent → 0 / max_marks
+              exempt  → left out of both totals            no entry → pending
+total_obtained = Σ marks over present + absent subjects
+total_max      = Σ max_marks over present + absent subjects   (each subject's own maximum)
+percentage     = total_obtained / total_max × 100, rounded half-up to 2 decimals
+                 (null if any subject is pending or total_max = 0)
+```
+
+Subject result: `pass` if `marks_obtained ≥ pass_marks`, otherwise `fail`. A subject
+without passing marks is `not_applicable`. `absent`, `exempt` and `pending` are reported
+as such.
+
+Overall result, in order:
+1. any subject pending → `incomplete`;
+2. nothing counted, or no pass criteria at all (no subject has passing marks and the exam
+   has no `pass_percentage`) → `not_applicable`;
+3. a subject with passing marks is failed or absent, or `percentage < pass_percentage` →
+   `fail`;
+4. otherwise `pass`.
+
+**Grades** are reported only when the exam has `grade_bands`
+(`[{"grade": "A1", "min_percentage": 91}, …]`). Grades must be unique, thresholds must be
+unique, and one band must start at 0. A percentage gets the band with the highest
+threshold not above it. Grades apply overall and per present subject. No universal scale
+is assumed: each exam defines its own, or reports no grades.
+
+### Publication and report cards
+
+Report cards are **snapshots**, never recalculated:
+- **Publish** (`marks.publish`): the exam must be in `marks_entry`. Every student's result
+  is calculated and stored in `exam_report_cards` under a new `exam_publications` row
+  (version 1, 2, …). The exam configuration used is frozen in `settings`, so names, maxima,
+  passing marks and grade bands are interpreted as they were. The exam becomes `published`.
+- **Reopen** (`marks.publish`, `reason` required): the active publication becomes
+  `withdrawn` (with who, when and why) and the exam returns to `marks_entry` for
+  corrections. Parents and students stop seeing it at once.
+- **Republish** creates the next version. Withdrawn versions stay readable by staff
+  (`GET /exams/{id}/publications`, `GET /exams/{id}/report-cards?version=1`,
+  `GET /report-cards/{id}`), unchanged, so a correction can never silently alter a
+  published report card.
+- A report card shows: school; academic year; class and section (the student's placement);
+  exam (name, type, dates, pass percentage, grade bands); student (admission number,
+  name); every subject with marks, maximum, passing marks, status, percentage, result and
+  grade; totals, percentage, grade and result; publication version, status and time.
+- The database enforces it: report cards can only be added to an active publication while
+  the exam is being published, and can never be updated or deleted. A publication can
+  only be withdrawn. `published` ⟺ an active publication exists (trigger), at most one
+  active publication per exam (partial unique index).
+
+PDF generation is not part of this phase. Report cards are served by the API.
+
+### Concurrency strategy
+
+- Configuration changes and lifecycle transitions lock the exam row (`FOR UPDATE`).
+- Marks writes (single, bulk, correction) take a **share** lock on the exam row, so
+  teachers entering different subjects do not block each other. Publishing and reopening
+  take `FOR UPDATE` and therefore wait for in-flight marks writes. A marks write that was
+  waiting then re-reads the exam (`populate_existing`), sees `published` and gets `409`.
+  A correction racing a publication is therefore either in the snapshot or refused, never
+  lost.
+- Corrections additionally lock the mark row and re-read it before computing the change.
+- `uq_exams_name_per_placement`, `UNIQUE (exam_id, subject_id)`,
+  `UNIQUE (exam_subject_id, student_id)`, `UNIQUE (mark_id, sequence)`,
+  `uq_exam_publications_one_active` and `UNIQUE (exam_id, version)` are the final
+  authority. Losers get a clean `409`.
+
+### Database constraints
+
+| Constraint | Enforces |
+|---|---|
+| `fk_exams_{year,class,section}_same_school`, `fk_exams_section_in_class` | an exam's references are in its school; the section belongs to the class |
+| `uq_exams_name_per_placement` (partial, `NULLS NOT DISTINCT`, non-cancelled) | no duplicate exam name per year/class/section |
+| `fk_exam_subjects_{exam,subject}_same_school`, `uq_exam_subjects_exam_id_subject_id` | components are same-school and unique per subject |
+| `fk_exam_marks_component` `(exam_subject_id, exam_id, school_id, max_marks)` → exam_subjects | a mark carries its component's exam, school and **maximum**; a referenced maximum cannot change |
+| `fk_exam_marks_exam_placement` `(exam_id, school_id, year, class)` → exams | a mark repeats its exam's school, year and class |
+| `fk_exam_marks_enrollment_placement` `(enrollment_id, school_id, student_id, year, class, section)` → student_enrollments | the student held an enrollment in exactly that school/year/class/section |
+| `uq_exam_marks_exam_subject_id_student_id` | one entry per student per component |
+| CHECKs | statuses, `0 ≤ marks ≤ max_marks`, marks present ⟺ status present, `0 < max ≤ 1000`, `0 ≤ pass ≤ max`, pass percentage 0–100, ordered dates/times, complete cancellation/correction/withdrawal fields, non-blank reasons |
+| `fk_exam_mark_changes_mark_same_school`, `uq_exam_mark_changes_mark_id_sequence` | history integrity |
+| `fk_exam_publications_exam_same_school`, `uq_exam_publications_exam_id_version`, `uq_exam_publications_one_active` | publication integrity |
+| `fk_exam_report_cards_{publication,exam_placement,enrollment_placement}`, `uq_exam_report_cards_publication_id_student_id` | report cards belong to their publication, exam, school and enrollment |
+| triggers `trg_exams_lifecycle`, `trg_exam_subjects_config`, `trg_exam_marks_guard`, `trg_exam_publications_guard`, `trg_exam_report_cards_insert`, `trg_exam_*_append_only` | transitions; configuration frozen outside draft/scheduled, removal only in draft, marks entry needs subjects; marks only in `marks_entry` and only for the exam's section; immutable placement; append-only history, publications and report cards |
+
+All foreign keys are `ON DELETE RESTRICT`. Trigger violations carry a constraint name, so
+they map to clean API errors like any other constraint. Deleting history or snapshot rows
+needs `SET LOCAL app.exam_history_purge = 'on'` (a maintenance step for test data). It
+guards against accidents, not against the database owner. Raw-SQL tests that bypass the
+services prove each rule (`test_exam_constraints.py`).
+
+### Endpoints (`/api/v1`)
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| POST | `/exams` | `marks.manage` (staff) | Creates a draft |
+| GET | `/exams`, `/exams/{id}` | `marks.read` | Filters: `academic_year_id`, `class_id`, `section_id`, `exam_type`, `status` |
+| PATCH | `/exams/{id}` | `marks.manage` (staff) | Field rules per status (above) |
+| POST | `/exams/{id}/schedule`, `/return-to-draft`, `/open-marks-entry` | `marks.manage` (staff) | Transitions |
+| POST | `/exams/{id}/cancel` | `marks.manage` (staff) | `{"reason"}` |
+| POST | `/exams/{id}/publish` | `marks.publish` | `{"allow_incomplete": false}` → publication (201) |
+| POST | `/exams/{id}/reopen` | `marks.publish` | `{"reason"}` → withdrawn publication |
+| GET | `/exams/{id}/results` | `marks.read` (staff) | Live calculation (paginated) |
+| GET | `/exams/{id}/publications` | `marks.read` (staff) | All versions with counts |
+| GET | `/exams/{id}/report-cards` | `marks.read` (staff) | Active publication, or `?version=` |
+| POST, GET | `/exams/{id}/subjects` | manage (staff) / read | Components |
+| GET, PATCH, DELETE | `/exams/{id}/subjects/{exam_subject_id}` | read / manage (staff) | PATCH in draft/scheduled; DELETE in draft only, without marks |
+| GET | `/exams/{id}/subjects/{exam_subject_id}/students` | `marks.read` | Eligible students with their entry; `?unmarked=true` |
+| POST | `/exams/{id}/subjects/{exam_subject_id}/marks` | `marks.manage` | One student |
+| POST | `/exams/{id}/subjects/{exam_subject_id}/marks/bulk` | `marks.manage` | Atomic, create-only, ≤ 200 |
+| GET | `/exams/{id}/subjects/{exam_subject_id}/marks` | `marks.read` | Filters: `student_id`, `status` |
+| GET, PATCH | `/exam-marks/{id}` | read / manage | PATCH = correction (`reason` required) |
+| GET | `/exam-marks/{id}/history` | `marks.read` | Every correction, in order |
+| GET | `/report-cards`, `/report-cards/{id}` | `marks.read` | Published report cards in scope. Filters: `student_id`, `academic_year_id`, `exam_id` |
+
+All lists paginate except publication history and mark history (small, bounded).
+SUPER_ADMIN selects the school with `X-School-ID`. Anything outside the caller's scope
+returns 404, the same as an unknown ID.
+
+### Audit events
+
+- **Exams:** `exam.created`, `exam.updated` (field diffs), `exam.scheduled`,
+  `exam.returned_to_draft`, `exam.marks_entry_opened`, `exam.cancelled` (reason),
+  `exam.published` (publication id, version, report-card and incomplete counts) and
+  `exam.reopened` (withdrawn version, reason). Each includes the previous status where
+  relevant.
+- **Subjects:** `exam_subject.created`, `.updated` (diffs), `.deleted` (removed values).
+- **Marks:** `exam_mark.created` (status, marks), `exam_mark.bulk_created` (count and
+  per-status counts) and `exam_mark.corrected` (history-row id, sequence, previous and new
+  status and marks, reason).
+- Remarks may hold personal details, so they are recorded as `remarks_changed` only, never
+  as text. Student names are not written to the audit log (IDs only). Passwords, OTPs and
+  tokens are never written. The audit sanitiser redacts any key containing `pass`, so
+  passing marks are audited as `qualifying_marks`.
+
+### Migration `0007_examinations_marks`
+
+- Creates the six tables, their indexes, composite keys and seven triggers.
+- Uses only composite-FK targets that earlier migrations created; no existing table,
+  column or row changes. Creates no rows.
+- Upgrade → downgrade → re-upgrade preserves Phase 1–6 data, including attendance
+  (`test_migration_0007.py`).
+
+### Testing
+
+- **Unit:** the result arithmetic (`test_result_calculation.py`: differing maxima,
+  half-up rounding, exact decimals, pending vs zero vs absent vs exempt, pass marks,
+  pass percentage, grade boundaries) and request validation (`test_exam_schemas.py`).
+- **Integration (real PostgreSQL):** exam configuration and lifecycle
+  (`test_exams_api.py`); single, bulk and corrected marks with faculty scope
+  (`test_exam_marks_api.py`); results, publication, reopen/republish and visibility
+  (`test_exam_results_api.py`); IDOR, cross-school, forged `X-School-ID` and filter attacks
+  (`test_exam_authorization.py`); raw-SQL integrity for every constraint and trigger
+  (`test_exam_constraints.py`); concurrency (`test_exam_concurrency.py`: duplicate exams,
+  components racing the end of configuration, publish vs cancel, identical/disjoint/
+  overlapping bulks, five concurrent corrections, duplicate publication and reopen,
+  correction racing publication, lock-wait proofs, a raw-SQL duplicate race); migration
+  preservation (`test_migration_0007.py`).
+- **Mutation testing** (`backend/tools/mutation_exams.py`): 29 protections are broken
+  one at a time. They cover faculty subject, section and date scope; exam visibility;
+  parent-child and student-self scope; published and unpublished access; cross-school
+  checks in the services and the database; maximum marks; duplicate marks; correction
+  history; subject removal; lifecycle triggers; and locks. **27 are caught.**
+
+  Two earlier survivors exposed real gaps, and dedicated tests now catch them:
+  - publishing without the exam lock could miss a write it had waited for;
+  - an inactive subject of another school could be told apart from an unknown one.
+
+  The 2 remaining survivors are **equivalent** mutants:
+  - dropping `school_id` from the eligibility query: the exam's academic year already pins
+    the school through `fk_enrollments_year_same_school`;
+  - dropping the pre-check for an existing mark: the unique constraint returns the same
+    `409` with the same error location.
+- **Real-HTTP E2E** (`backend/tools/e2e_exams.py`) against the rebuilt Docker stack:
+  78/78 checks. They cover:
+  - exam creation and the refusal for faculty and parents;
+  - subject configuration, and subject removal refused once scheduled;
+  - single, bulk and invalid marks, and bulk rollback;
+  - corrections and history;
+  - result calculation;
+  - publication refused while marks are missing;
+  - concurrent identical bulks and concurrent publication (exactly one wins);
+  - a correction racing publication (the snapshot equals the committed mark);
+  - parent and student access and denial;
+  - unpublished-result denial;
+  - cross-school, IDOR, forged `X-School-ID` and filter attacks;
+  - reopen and republish with the version 1 snapshot preserved;
+  - a scan of the run's stored audit rows (no password, token, OTP or student name).
+
+### Verification tools (`backend/tools/`)
+
+Developer tools, not part of the application or the pytest suite.
+
+```bash
+# Real-HTTP E2E against the running compose stack (from the repository root):
+docker compose up -d --build
+python backend/tools/e2e_exams.py --cleanup     # omit --cleanup to keep the data
+
+# Mutation testing (from backend/, test database up):
+python tools/mutation_exams.py --list
+python tools/mutation_exams.py                  # or --only <text>
+```
+
+- `e2e_exams.py` uses the standard library only.
+  - It refuses to run unless the backend reports `APP_ENV` `development` or `test`, and
+    it needs `OTP_DELIVERY_BACKEND=development_console` (parent sign-in reads the
+    development OTP code from the backend log).
+  - It creates two fresh schools (`E2E7A-<tag>`/`E2E7B-<tag>`) and their staff through the
+    admin CLI, with a random password passed by environment variable. The password is
+    never printed and never put on a command line.
+  - `--cleanup` deletes **only** the rows of the schools and users this run created (plus
+    their audit rows), in one transaction. `login_attempts` rows hold only identifier
+    hashes and are left to expire.
+- `mutation_exams.py` only ever touches the **test** database, the same one pytest uses:
+  `TEST_POSTGRES_DB`, default `<POSTGRES_DB>_test`. It refuses any name that does not end
+  in `_test`.
+  - Database mutants drop one constraint or trigger and rebuild the exam schema
+    afterwards.
+  - Code mutants edit one file at a time, after copying it to `<file>.mutation-backup`.
+    An interrupted run is detected and restored on the next start, so a mutation can
+    never be left in the source.
+
 ## Health endpoints
 
 | Endpoint                   | Purpose                                     | Codes     |
@@ -1062,6 +1440,26 @@ only narrow results. Anything outside the scope returns 404, the same as an unkn
 - Compose ports are bound to `127.0.0.1` only.
 
 ## Known limitations
+
+Phase 7:
+- **One component per subject per exam.** Theory/practical (or written/oral) splits of one
+  subject need separate exams for now. Sub-components are a natural extension.
+- **Grading is per exam.** Each exam carries its own optional grade bands and pass
+  percentage. There is no school-wide grading-scheme catalog, no grade points/CGPA and no
+  cumulative (term or annual) result across exams.
+- **Absence policy is fixed.** An absent subject with passing marks fails; without passing
+  marks it only lowers the percentage. Other policies (e.g. medical re-tests) would need a
+  configurable rule.
+- **Exam configuration is staff-only.** Faculty cannot create exams or add subjects.
+  Delegated exam coordination would need a new designation (like the class-teacher idea in
+  Phase 6).
+- **No PDF report cards, ranks/positions, attendance on report cards, or per-report-card
+  teacher remarks.** These belong to the reporting phase.
+- **Student names on report cards are read live** (they are identity, not result data).
+  Everything that determines the result is frozen in the snapshot.
+- **No result notifications.** That belongs to the notifications phase.
+- **History purge** (`app.exam_history_purge`) is a guard against accidents, not a
+  security boundary against the database owner.
 
 Phase 6:
 - **Daily roll calls are recorded by school staff only.** There is no class-teacher concept
@@ -1146,6 +1544,6 @@ Phase 2:
 
 1. ✅ Foundation  2. ✅ Authentication + RBAC  3. ✅ School + academic structure
 4. ✅ Students/parents/enrollments  5. ✅ Faculty + faculty assignments  6. ✅ Attendance
-7. Exams + marks  8. Assignments  9. Timetable
+7. ✅ Exams + marks  8. Assignments (not started)  9. Timetable
 10. Announcements + notifications  11. Reports + dashboards  12. Data import
 13. Frontend portals  14. AI layer  15. Security hardening + deployment

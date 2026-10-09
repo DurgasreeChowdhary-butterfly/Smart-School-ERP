@@ -365,3 +365,187 @@ def aworld(fworld: World) -> AttendanceWorld:
     return AttendanceWorld(
         w=w, f=headers["f"], g=headers["g"], h=headers["h"], faculty_ids=faculty_ids, s=s, e=e
     )
+
+
+# ============================================================================== exams
+EXAM_START = "2026-09-01"
+EXAM_END = "2026-09-10"
+API = "/api/v1"
+
+
+@dataclass
+class ExamWorld:
+    """``aworld`` (faculty F/G/H and placed students) plus exam helpers.
+
+    * F teaches math_a in section_a, G sci_a in section_a, H math_a in section_a_b.
+    * Students a1, a2 (section_a, logins), ab (section_a_b), c2 (class2_a), prev
+      (previous year), b (school B).
+    """
+
+    a: AttendanceWorld
+
+    @property
+    def client(self) -> TestClient:
+        return self.a.client
+
+    @property
+    def admin(self) -> dict[str, str]:
+        return self.a.admin
+
+    @property
+    def ids(self) -> dict[str, str]:
+        return self.a.w.ids
+
+    def sid(self, key: str) -> str:
+        return self.a.sid(key)
+
+    # ---------------------------------------------------------------- exams
+    def exam(
+        self,
+        headers: dict[str, str] | None = None,
+        *,
+        year: str = "year_a",
+        cls: str = "class_a",
+        sec: str | None = None,
+        name: str = "Midterm",
+        start: str = EXAM_START,
+        end: str = EXAM_END,
+        **extra: Any,
+    ) -> Any:
+        body: dict[str, Any] = {
+            "academic_year_id": self.ids[year],
+            "class_id": self.ids[cls],
+            "name": name,
+            "exam_type": "midterm",
+            "start_date": start,
+            "end_date": end,
+            **extra,
+        }
+        if sec is not None:
+            body["section_id"] = self.ids[sec]
+        return self.client.post(f"{API}/exams", headers=headers or self.admin, json=body)
+
+    def exam_id(self, headers: dict[str, str] | None = None, **kwargs: Any) -> str:
+        response = self.exam(headers, **kwargs)
+        assert response.status_code == 201, response.text
+        return str(response.json()["id"])
+
+    def component(
+        self,
+        exam_id: str,
+        subject: str = "math_a",
+        headers: dict[str, str] | None = None,
+        *,
+        max_marks: Any = 100,
+        pass_marks: Any = 35,
+        **extra: Any,
+    ) -> Any:
+        body = {"subject_id": self.ids[subject], "max_marks": max_marks, **extra}
+        if pass_marks is not None:
+            body["pass_marks"] = pass_marks
+        return self.client.post(
+            f"{API}/exams/{exam_id}/subjects", headers=headers or self.admin, json=body
+        )
+
+    def component_id(self, exam_id: str, subject: str = "math_a", **kwargs: Any) -> str:
+        response = self.component(exam_id, subject, **kwargs)
+        assert response.status_code == 201, response.text
+        return str(response.json()["id"])
+
+    def action(
+        self,
+        exam_id: str,
+        verb: str,
+        headers: dict[str, str] | None = None,
+        body: dict[str, Any] | None = None,
+    ) -> Any:
+        return self.client.post(
+            f"{API}/exams/{exam_id}/{verb}", headers=headers or self.admin, json=body
+        )
+
+    def open(self, exam_id: str) -> None:
+        for verb in ("schedule", "open-marks-entry"):
+            response = self.action(exam_id, verb)
+            assert response.status_code == 200, response.text
+
+    def setup(
+        self,
+        subjects: tuple[str, ...] = ("math_a", "sci_a"),
+        *,
+        open_entry: bool = True,
+        **exam: Any,
+    ) -> tuple[str, dict[str, str]]:
+        """An exam with one component per subject (max 100, pass 35), opened for marks."""
+        exam_id = self.exam_id(**exam)
+        components = {subject: self.component_id(exam_id, subject) for subject in subjects}
+        if open_entry:
+            self.open(exam_id)
+        return exam_id, components
+
+    # ---------------------------------------------------------------- marks
+    def subject_path(self, exam_id: str, component_id: str) -> str:
+        return f"{API}/exams/{exam_id}/subjects/{component_id}"
+
+    def mark(
+        self,
+        exam_id: str,
+        component_id: str,
+        student: str,
+        marks: Any = 50,
+        headers: dict[str, str] | None = None,
+        **extra: Any,
+    ) -> Any:
+        body: dict[str, Any] = {"student_id": self.sid(student), **extra}
+        if marks is not None:
+            body["marks_obtained"] = marks
+        return self.client.post(
+            f"{self.subject_path(exam_id, component_id)}/marks",
+            headers=headers or self.admin,
+            json=body,
+        )
+
+    def mark_id(self, exam_id: str, component_id: str, student: str, marks: Any = 50) -> str:
+        response = self.mark(exam_id, component_id, student, marks)
+        assert response.status_code == 201, response.text
+        return str(response.json()["id"])
+
+    def bulk(
+        self,
+        exam_id: str,
+        component_id: str,
+        entries: list[dict[str, Any]],
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        marks = [{**e, "student_id": self.sid(e["student_id"])} for e in entries]
+        return self.client.post(
+            f"{self.subject_path(exam_id, component_id)}/marks/bulk",
+            headers=headers or self.admin,
+            json={"marks": marks},
+        )
+
+    def correct(self, mark_id: str, headers: dict[str, str] | None = None, **body: Any) -> Any:
+        return self.client.patch(
+            f"{API}/exam-marks/{mark_id}", headers=headers or self.admin, json=body
+        )
+
+    def publish(self, exam_id: str, headers: dict[str, str] | None = None, **body: Any) -> Any:
+        return self.action(exam_id, "publish", headers, body or None)
+
+    def get(self, path: str, headers: dict[str, str] | None = None, **params: Any) -> Any:
+        return self.client.get(f"{API}{path}", headers=headers or self.admin, params=params)
+
+    def items(self, path: str, headers: dict[str, str] | None = None, **params: Any) -> list[Any]:
+        response = self.get(path, headers, **params)
+        assert response.status_code == 200, response.text
+        return list(response.json()["items"])
+
+    def parent_of(self, *students: str) -> dict[str, str]:
+        return self.a.parent_of(*students)
+
+    def student_headers(self, adm: str) -> dict[str, str]:
+        return self.a.w.student_headers(adm)
+
+
+@pytest.fixture
+def eworld(aworld: AttendanceWorld) -> ExamWorld:
+    return ExamWorld(aworld)

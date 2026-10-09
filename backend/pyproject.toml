@@ -59,6 +59,8 @@ select = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106", "S311"]
+# Developer tools: console output and fixed docker/pytest subprocess calls.
+"tools/**" = ["T201", "S603", "S607"]
 
 [tool.ruff.lint.isort]
 # The local "alembic/" migrations folder must not make the alembic package look first-party.
