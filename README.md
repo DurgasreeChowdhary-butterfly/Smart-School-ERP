@@ -2,18 +2,18 @@
 
 Centralized school management platform: parent, student, faculty and management portals.
 
-**Status:** Phase 7 complete — examinations: exams per class or section with a
-draft → scheduled → marks entry → published lifecycle, subject components with their own
-maximum and passing marks, faculty-scoped single and atomic bulk marks entry, corrections
-with an append-only history, deterministic result calculation, and report cards frozen as
-versioned publication snapshots that parents and students see only once published. It
-builds on Phase 6 (attendance), Phase 5 (faculty and assignments), Phase 4 (students,
-parents, enrollments), Phase 3 (schools, academic structure), Phase 2 (authentication,
-RBAC, audit) and Phase 1 (FastAPI, PostgreSQL, Alembic, Docker, tests).
+**Status:** Phase 8 complete — assignments and submissions: section-and-subject
+coursework with a draft → published → closed lifecycle, faculty-scoped management,
+student text submissions with an append-only revision history, explicit deadlines and
+late rules, and reviews (feedback, optional grades) with an append-only change history.
+It builds on Phase 7 (examinations), Phase 6 (attendance), Phase 5 (faculty and
+assignments), Phase 4 (students, parents, enrollments), Phase 3 (schools, academic
+structure), Phase 2 (authentication, RBAC, audit) and Phase 1 (FastAPI, PostgreSQL,
+Alembic, Docker, tests).
 
-> **Phase 8 (assignments) has NOT started.** Not implemented yet: assignments/submissions,
-> timetable, announcements, notifications, fees, reports and dashboards (beyond attendance
-> summaries and exam report cards), PDF report cards, AI and the frontend portals.
+> **Phase 9 (timetable) has NOT started.** Not implemented yet: timetable, announcements,
+> notifications, fees, reports and dashboards (beyond attendance summaries and exam report
+> cards), file attachments, PDF report cards, AI and the frontend portals.
 
 ## Architecture
 
@@ -38,7 +38,7 @@ backend/
     api/v1/            versioned routers: health, auth, roles, users, school,
                        academic_years, classes, sections, subjects, students,
                        parents, enrollments, faculty, faculty_assignments,
-                       attendance, exams
+                       attendance, exams, assignments
     core/              cross-cutting infrastructure: logging, errors, middleware,
                        request context (IP / user agent / request id)
     models/            ORM models: users, RBAC, auth sessions/tokens/OTP, audit log,
@@ -46,17 +46,21 @@ backend/
                        students, parents, student_parents, student_enrollments,
                        faculty, faculty_assignments, attendance, exams
                        (exams, exam_subjects, exam_marks, exam_mark_changes,
-                       exam_publications, exam_report_cards)
+                       exam_publications, exam_report_cards), assignments
+                       (assignments, assignment_submissions, revisions,
+                       review changes)
     schemas/           request/response models, shared envelopes
     services/          business logic: auth, OTP sign-in, RBAC, user provisioning,
                        school profile, academic structure, students, parents,
                        enrollments, faculty and faculty assignments,
                        attendance, exams, marks and results (the arithmetic
-                       lives in result_calculation)
+                       lives in result_calculation), assignments and
+                       submissions
     repositories/      data access
     security/          passwords, JWT/refresh tokens, OTP, RBAC catalog,
                        principal, resource-scope framework, school scope,
-                       people scope, faculty scope, attendance scope, exam scope
+                       people scope, faculty scope, attendance scope, exam scope,
+                       assignment scope
     audit/             audit-trail writer with secret redaction
     utils/             small generic helpers
   alembic/             migrations
@@ -162,6 +166,7 @@ alembic revision --autogenerate -m "describe change"   # review the generated fi
 | `0004_students_parents` | students, parents, student_parents, student_enrollments; `UNIQUE (id, school_id)` on academic_years, sections, subjects and users, plus `UNIQUE (id, class_id)` on sections, as composite-FK targets. Additive only: no existing rows are touched. |
 | `0005_faculty_assignments` | faculty, faculty_assignments, with composite same-school foreign keys and the partial unique index for active assignments. No existing table is modified and no rows are created. |
 | `0006_attendance` | attendance_sessions, attendance_records, attendance_record_changes (+ append-only trigger); `UNIQUE (id, school_id, student_id, academic_year_id, class_id, section_id)` on student_enrollments as a composite-FK target. Additive only: no existing column or row changes, no rows are created. |
+| `0008_assignments_submissions` | assignments, assignment_submissions, assignment_submission_revisions, assignment_review_changes, their composite same-school keys and lifecycle/append-only triggers; the `assignment.submit` permission granted to STUDENT. No other existing row or column changes. |
 | `0007_examinations_marks` | exams, exam_subjects, exam_marks, exam_mark_changes, exam_publications, exam_report_cards, their composite same-school keys and the lifecycle/append-only triggers. Uses only existing composite-FK targets: no existing table, column or row changes, no rows are created. |
 
 `tests/integration/test_database.py` fails if models and migrations drift apart, and runs
@@ -349,6 +354,7 @@ Source of truth: `backend/app/security/permissions.py`, seeded by migration
 | `marks.publish` | ✓ | ✓ | ✓ |  |  |  |
 | `assignment.read` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `assignment.manage` | ✓ | ✓ |  | ✓ |  |  |
+| `assignment.submit` |  |  |  |  |  | ✓ |
 | `timetable.read` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `timetable.manage` | ✓ | ✓ |  |  |  |  |
 | `announcement.read` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -360,7 +366,8 @@ Source of truth: `backend/app/security/permissions.py`, seeded by migration
 | `ai.read` | ✓ | ✓ | ✓ |  |  |  |
 | `ai.manage` | ✓ | ✓ |  |  |  |  |
 
-Grant counts: SUPER_ADMIN 39, SCHOOL_ADMIN 37, MANAGEMENT 20, FACULTY 17, PARENT 14, STUDENT 13.
+Grant counts: SUPER_ADMIN 39, SCHOOL_ADMIN 37, MANAGEMENT 20, FACULTY 17, PARENT 14, STUDENT 14
+(`assignment.submit` was added in Phase 8; see migration 0008).
 
 Design notes:
 - PARENT and STUDENT can only read, scoped to their children or themselves. FACULTY manage
@@ -1407,6 +1414,245 @@ python tools/mutation_exams.py                  # or --only <text>
     An interrupted run is detected and restored on the next start, so a mutation can
     never be left in the source.
 
+## Assignments and submissions (Phase 8)
+
+Phase 8 adds coursework: assignments for a section and subject, student submissions with
+an append-only revision history, deadlines, and reviews (feedback and optional grades)
+with an append-only review history. It reuses the existing authentication, RBAC, school
+scope, Phase 5 faculty assignment scope and Phase 4 parent/student scope. There is no
+second authorization system.
+
+### Data model
+
+| Table | Holds |
+|---|---|
+| `assignments` | school + academic year + class + **section** + **subject**, `title`, `instructions`, `assigned_on` (school-local date), `due_at` (absolute instant), `allow_late`, `allow_resubmission`, optional `max_marks`, `status`, who created/published/closed it and when |
+| `assignment_submissions` | one per student per assignment: the student and the enrollment placing them in the section, `revision_count`, first/last submission time, `is_late` (latest revision), and the review: `marks_awarded`, `feedback`, `reviewed_revision`, reviewer and time. `status` (`submitted`/`reviewed`) is a generated column |
+| `assignment_submission_revisions` | append-only: every (re)submission's `content` (text, ≤ 20,000 characters), who, when, and the **due time at that moment**. `is_late` is a generated column (`submitted_at > due_at`) |
+| `assignment_review_changes` | append-only: each review or review change, with previous/new marks and feedback, the revision reviewed, `reason` (required after the first), who, when |
+
+**Attachments are not supported.** The platform has no file storage. There is no upload
+handling, no `python-multipart` and no storage backend. Rather than adding an insecure or
+unreviewed upload path, submissions are validated text. Secure attachments (type and size
+limits, server-generated storage keys, authorized downloads) are a future extension.
+
+### Lifecycle
+
+```
+draft ──publish (due_at in the future)──▶ published ──close──▶ closed
+```
+
+| Status | Editable | Visible to students/parents | Submissions | Reviews |
+|---|---|---|---|---|
+| `draft` | every field | no | no | no |
+| `published` | title, instructions, `due_at`, `allow_late`, `allow_resubmission` | yes | yes | yes |
+| `closed` | nothing | yes | no | yes |
+
+- Placement (year, class, section, subject) is immutable.
+- `max_marks` and `assigned_on` are fixed once published, so grades and authorization
+  dates never shift under existing work.
+- There is no reopening and no deletion.
+- A trigger enforces all of this as well.
+
+### Who may do what
+
+| Role | Read | Create / edit / publish / close | Submit | Review / grade |
+|---|---|:-:|:-:|:-:|
+| SUPER_ADMIN (selected school), SCHOOL_ADMIN | the whole school | ✓ | | ✓ |
+| MANAGEMENT | the whole school | | | |
+| FACULTY | their section + subject | their section + subject | | their section + subject |
+| STUDENT | own section's published work, own submissions | | own work | |
+| PARENT | linked children's published work and submissions (not the submitted text) | | | |
+
+**Faculty rule:** an *effective* Phase 5 assignment for the assignment's **year + class +
+section + subject**. It must be effective **today** and **on `assigned_on`**, the same rule
+as attendance session dates and exam assessment dates. Maths in 8-A does not reach
+physics, 8-B, another class, year or school. The rule governs reading, managing and
+reviewing alike, as one SQL condition inside every query. Filters only narrow, and other
+IDs return 404.
+
+**Permissions:** reads use `assignment.read`, and management and reviews use
+`assignment.manage` (both existing). Students had no permission that fits handing in
+work, and using a read permission for a write would blur the model. So **one permission
+was added: `assignment.submit`, granted to STUDENT only.** It is persona-only, so
+administrators do not get it. Migration 0008 seeds it with the deterministic id scheme of
+migration 0002, and the RBAC test checks that the database matches the code. Grant
+counts: STUDENT 14, every other role unchanged.
+
+### Submissions, eligibility and deadlines
+
+- **The submitter is always the caller.** A student hands in their own work; the request
+  has no student field (`extra` fields are rejected).
+- **Eligibility to submit:** the assignment is published and an enrollment places the
+  student in its year, class and section **today in the school's time zone** (the same
+  `enrollment_covers` rule as attendance and exams).
+  - **Transfers:** a student who moves to another section after publication can no longer
+    hand in work for the old section's assignments, but their earlier submissions stay
+    readable.
+  - A student who joins a section can submit its open assignments.
+  - The submission is pinned to the enrollment it was made under (composite foreign key).
+- **Visibility for students and parents:** published or closed assignments of a section
+  the student was enrolled in during the assignment window (enrollment start on or before
+  the due date, and no end before `assigned_on`), plus any assignment they have
+  submitted to. Drafts are never visible.
+- **Deadlines:** `due_at` must carry a time-zone offset; naive date-times are rejected,
+  not guessed. Its school-local date must be on or after `assigned_on` and inside the
+  academic year.
+  - A (re)submission after `due_at` is **late**. It is refused (`409`) unless
+    `allow_late`.
+  - Every revision snapshots the due time, so moving the deadline later never rewrites
+    whether earlier work was late. A trigger checks that the snapshot is honest and
+    refuses late revisions when they are not allowed.
+- **Resubmission** (`POST /assignment-submissions/{id}/revisions`) appends revision N+1
+  and keeps every earlier one. It is allowed while the assignment is published,
+  `allow_resubmission` is set, the student is still eligible, and the work has **not been
+  reviewed**: a review is final for the student.
+- **Missing work** is *outstanding* (`GET /assignments/{id}/students?outstanding=true`,
+  status `not_submitted`). It is never treated as zero marks.
+
+### Reviews and grading
+
+- `PUT /assignment-submissions/{id}/review` records feedback and/or marks for the latest
+  revision, by staff or faculty who manage the assignment, while it is published or
+  closed.
+- Marks need `max_marks` on the assignment (otherwise `422`, feedback only). They must be
+  between 0 and the maximum, with at most two decimals; invalid input is rejected, never
+  rounded. The database repeats the check (the submission carries the assignment's
+  maximum through a composite foreign key).
+- The first review needs no reason. **Every later change needs `reason`**. Each review is
+  appended to `assignment_review_changes` with previous and new marks and feedback, who
+  and when (`GET …/review-history`).
+- Assignment grades are separate from exams. They never touch exam marks, results or
+  published report cards (tested).
+
+### Concurrency
+
+- Every assignment write locks its row `FOR UPDATE`. (Re)submissions take a **share** lock
+  on it, so closing waits for in-flight submissions, and a submission that waited then
+  sees `closed` and gets `409`.
+- Writes to one submission (resubmission, review) lock the submission row and re-read it.
+  A resubmission racing a review therefore either lands first (and is the revision
+  reviewed) or is refused because the work was reviewed.
+- `UNIQUE (assignment_id, student_id)`, `UNIQUE (submission_id, revision)` and
+  `UNIQUE (submission_id, sequence)` are the final authority. Losers get `409`.
+
+### Database constraints
+
+| Constraint | Enforces |
+|---|---|
+| `fk_assignments_{year,class,section,subject}_same_school`, `fk_assignments_section_in_class` | an assignment's references are in its school; the section belongs to the class |
+| `fk_assignment_submissions_assignment_placement` `(assignment_id, school, year, class, section)` → assignments | a submission repeats its assignment's placement |
+| `fk_assignment_submissions_enrollment_placement` `(enrollment_id, school, student, year, class, section)` → student_enrollments | the student held an enrollment in exactly that section |
+| `fk_assignment_submissions_max_marks` + `ck_assignment_submissions_marks_range` | `0 ≤ marks ≤ the assignment's max_marks`; no marks without a maximum |
+| `uq_assignment_submissions_assignment_id_student_id` | one submission per student per assignment |
+| `uq_assignment_submission_revisions_submission_id_revision`, `uq_assignment_review_changes_submission_id_sequence` | gapless, non-duplicated histories |
+| CHECKs | statuses, `0 < max_marks ≤ 1000`, complete publication/closure/review fields, content length, non-blank text, reason required after the first review |
+| triggers `trg_assignments_lifecycle`, `trg_assignment_submissions_guard`, `trg_assignment_revisions_guard`, `trg_assignment_review_changes_append_only` | transitions, immutable placement, frozen grading settings, closed read-only, submissions only while published, honest due-time snapshots, late refusal, append-only histories |
+
+All foreign keys are `ON DELETE RESTRICT`. Deleting submissions or history needs
+`SET LOCAL app.assignment_history_purge = 'on'` (a maintenance guard against accidents,
+not a security boundary). Raw-SQL tests prove each rule (`test_assignment_constraints.py`).
+
+### Endpoints (`/api/v1`)
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| POST | `/assignments` | `assignment.manage` | Creates a draft (faculty: own section + subject) |
+| GET | `/assignments`, `/assignments/{id}` | `assignment.read` | Filters: `academic_year_id`, `class_id`, `section_id`, `subject_id`, `status` |
+| PATCH | `/assignments/{id}` | `assignment.manage` | Field rules per status |
+| POST | `/assignments/{id}/publish`, `/assignments/{id}/close` | `assignment.manage` | Transitions |
+| GET | `/assignments/{id}/students` | `assignment.read` (staff, teaching faculty) | Roster with submission state; `?outstanding=true`; never through a parent or student link |
+| POST | `/assignments/{id}/submissions` | `assignment.submit` | Student hands in own work |
+| GET | `/assignment-submissions`, `/assignment-submissions/{id}` | `assignment.read` | Filters: `assignment_id`, `student_id`, `status`; parents get `content: null` |
+| POST | `/assignment-submissions/{id}/revisions` | `assignment.submit` | Resubmission |
+| GET | `/assignment-submissions/{id}/revisions` | `assignment.read` | Every revision (student, staff, faculty; not parents) |
+| PUT | `/assignment-submissions/{id}/review` | `assignment.manage` | Feedback and/or marks; `reason` to change |
+| GET | `/assignment-submissions/{id}/review-history` | `assignment.read` | Every review change |
+
+All lists paginate except the two histories. SUPER_ADMIN selects the school with
+`X-School-ID`. Anything outside the caller's scope returns 404.
+
+### Audit events
+
+- `assignment.created` (with whether it is graded), `assignment.updated` (field diffs;
+  instructions by name only), `assignment.published` and `assignment.closed`.
+- `assignment_submission.created` and `assignment_submission.resubmitted` (revision,
+  lateness, **content length only**).
+- `assignment_submission.reviewed` and `assignment_submission.review_changed`
+  (history-row id, revision, previous and new marks, `feedback_changed`, reason).
+- Submitted work and feedback text are not written to the audit log; the dedicated
+  history tables hold them. Passwords, OTPs and tokens are never written; the E2E run
+  scans the stored audit metadata to prove it.
+
+### Migration `0008_assignments_submissions`
+
+- Creates the four tables, their composite keys, indexes and four triggers.
+- Adds the `assignment.submit` permission and its STUDENT grant. Downgrade removes them.
+- No other existing table, column or row changes. Creates no domain rows.
+- Upgrade → downgrade → re-upgrade preserves Phase 1–7 data (`test_migration_0008.py`).
+  The 0005–0007 migration tests now compare data at their own revision before moving to
+  head, because head legitimately adds a catalog row.
+
+### Testing
+
+- **Unit:** request validation (`test_assignment_schemas.py`: deadlines need a time-zone
+  offset, marks and text limits, submission content, review input).
+- **Integration (real PostgreSQL):** assignment creation, lifecycle, field rules per
+  status and faculty scope (`test_assignments_api.py`); submissions, eligibility,
+  transfers, deadlines and late rules, resubmission history, reviews, grades and review
+  history, personal visibility and audit events (`test_assignment_submissions_api.py`);
+  IDOR, cross-school, forged `X-School-ID`, filter attacks and dual-role users (a faculty
+  member or a student who is also a parent) (`test_assignment_authorization.py`);
+  raw-SQL integrity for every constraint and trigger (`test_assignment_constraints.py`);
+  concurrency (`test_assignment_concurrency.py`: concurrent first submissions, concurrent
+  resubmissions and review changes, resubmission racing a review, submission racing
+  closure, concurrent publication, lock-wait proofs, a raw-SQL duplicate race); migration
+  preservation (`test_migration_0008.py`). 93 Phase 8 tests.
+- **Mutation testing** (`backend/tools/mutation_assignments.py`): 25 protections are
+  broken one at a time. They cover faculty subject, section and date scope; draft
+  visibility; parent-child and student-self scope; submission text and roster
+  visibility for dual-role users;
+  eligibility; ownership; deadlines; resubmission after review; grade limits; review
+  reasons and history; review scope; duplicates; database constraints and triggers; and
+  locks. **26 of 27 are caught.**
+
+  Survivors found real gaps, and dedicated tests now catch them:
+  - assignment visibility once matched *any* student's enrollment in the section;
+  - the service checks for review scope and resubmission ownership looked redundant, but
+    a user holding a parent role besides FACULTY or STUDENT can *see* a child's
+    submission. Only these checks stop them reviewing work they do not teach, or adding
+    revisions to someone else's work;
+  - the roster and submitted text were granted to anyone *holding* the faculty role, so a
+    faculty member who is also a parent saw the whole section's roster and their child's
+    work for subjects they do not teach. Both now require staff reach over the
+    assignment itself (`assignment_staff_reach`).
+
+  The remaining survivor is **equivalent**: dropping the pre-check for an existing
+  submission, because the unique constraint returns the same `409` with the same message.
+- **Real-HTTP E2E** (`backend/tools/e2e_assignments.py`) against the Docker stack:
+  57/57 checks. They cover:
+  - creation refused for the wrong teacher, parents and students, naive due times and
+    cross-school subjects;
+  - drafts hidden from students and parents, and `max_marks` frozen once published;
+  - submission, duplicate refusal, resubmission history and concurrent duplicate
+    submissions (exactly one wins);
+  - late work refused or accepted (and flagged) per `allow_late`;
+  - grade validation, review scope, a reason required to change a grade, grade history,
+    and resubmission refused after review;
+  - parent and student access and denial (parents see grades but not the work);
+  - cross-school, IDOR, forged `X-School-ID` and filter attacks;
+  - closing (no new submissions, reviews still allowed);
+  - report cards untouched by assignment grading;
+  - a scan of the run's stored audit rows (no password, token or student name).
+
+```bash
+docker compose up -d --build
+python backend/tools/e2e_assignments.py --cleanup   # from the repository root
+python tools/mutation_assignments.py                # from backend/, or --only <text>
+```
+
+Both tools follow the same safety rules as the Phase 7 tools above.
+
 ## Health endpoints
 
 | Endpoint                   | Purpose                                     | Codes     |
@@ -1440,6 +1686,20 @@ python tools/mutation_exams.py                  # or --only <text>
 - Compose ports are bound to `127.0.0.1` only.
 
 ## Known limitations
+
+Phase 8:
+- **No file attachments.** The platform has no secure file storage; submissions are
+  text (≤ 20,000 characters). Attachments need a storage design first (allow-listed
+  types, size limits, server-generated keys, authorized downloads, malware scanning).
+- **No reopening.** A closed assignment stays closed; extend `due_at` (or set
+  `allow_late`) before closing instead. Drafts cannot be deleted (there are no deletes).
+- **A review is final for the student.** There is no "return for revision" workflow;
+  staff can still change the review (with a reason).
+- **Lateness is binary** (on time / late). There are no grace periods or late penalties;
+  graders account for lateness in the marks.
+- **Assignment grades are not aggregated** into any result or report card (by design for
+  now; reporting is a later phase).
+- **No notifications** for new work, deadlines or reviews (notifications phase).
 
 Phase 7:
 - **One component per subject per exam.** Theory/practical (or written/oral) splits of one
@@ -1544,6 +1804,6 @@ Phase 2:
 
 1. ✅ Foundation  2. ✅ Authentication + RBAC  3. ✅ School + academic structure
 4. ✅ Students/parents/enrollments  5. ✅ Faculty + faculty assignments  6. ✅ Attendance
-7. ✅ Exams + marks  8. Assignments (not started)  9. Timetable
+7. ✅ Exams + marks  8. ✅ Assignments  9. Timetable (not started)
 10. Announcements + notifications  11. Reports + dashboards  12. Data import
 13. Frontend portals  14. AI layer  15. Security hardening + deployment

@@ -146,8 +146,10 @@ def test_0005_upgrade_downgrade_reupgrade_preserves_data(connection: Connection)
     ).scalar()
     assert kept == 6
 
-    command.upgrade(cfg, "head")
+    # Compare at this revision: later migrations may legitimately add catalog rows.
+    command.upgrade(cfg, "0005_faculty_assignments")
     assert _snapshot(connection, school) == before
+    command.upgrade(cfg, "head")
     constraints = set(
         connection.execute(
             text(

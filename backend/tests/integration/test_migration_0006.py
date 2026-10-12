@@ -127,8 +127,10 @@ def test_0006_upgrade_downgrade_reupgrade_preserves_data(connection: Connection)
         "SELECT count(*) FROM pg_proc WHERE proname = 'attendance_record_changes_append_only'",
     )
 
-    command.upgrade(cfg, "head")
+    # Compare at this revision: later migrations may legitimately add catalog rows.
+    command.upgrade(cfg, "0006_attendance")
     assert _phase_5_snapshot(connection, school) == before
+    command.upgrade(cfg, "head")
     constraints = set(
         connection.execute(
             text(

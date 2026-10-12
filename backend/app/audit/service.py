@@ -104,6 +104,14 @@ class AuditAction(StrEnum):
     EXAM_MARK_CREATED = "exam_mark.created"
     EXAM_MARK_BULK_CREATED = "exam_mark.bulk_created"
     EXAM_MARK_CORRECTED = "exam_mark.corrected"
+    ASSIGNMENT_CREATED = "assignment.created"
+    ASSIGNMENT_UPDATED = "assignment.updated"
+    ASSIGNMENT_PUBLISHED = "assignment.published"
+    ASSIGNMENT_CLOSED = "assignment.closed"
+    ASSIGNMENT_SUBMISSION_CREATED = "assignment_submission.created"
+    ASSIGNMENT_SUBMISSION_RESUBMITTED = "assignment_submission.resubmitted"
+    ASSIGNMENT_SUBMISSION_REVIEWED = "assignment_submission.reviewed"
+    ASSIGNMENT_SUBMISSION_REVIEW_CHANGED = "assignment_submission.review_changed"
 
 
 class AuditOutcome(StrEnum):

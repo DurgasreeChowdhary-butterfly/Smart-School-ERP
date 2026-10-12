@@ -71,6 +71,7 @@ class PermissionName(StrEnum):
     # assignments
     ASSIGNMENT_READ = "assignment.read"
     ASSIGNMENT_MANAGE = "assignment.manage"
+    ASSIGNMENT_SUBMIT = "assignment.submit"
     # timetable
     TIMETABLE_READ = "timetable.read"
     TIMETABLE_MANAGE = "timetable.manage"
@@ -131,6 +132,7 @@ PERMISSION_DESCRIPTIONS: dict[PermissionName, str] = {
     PermissionName.MARKS_PUBLISH: "Publish exam results.",
     PermissionName.ASSIGNMENT_READ: "View assignments within scope.",
     PermissionName.ASSIGNMENT_MANAGE: "Create assignments and review submissions within scope.",
+    PermissionName.ASSIGNMENT_SUBMIT: "Submit own work for assignments.",
     PermissionName.TIMETABLE_READ: "View timetables within scope.",
     PermissionName.TIMETABLE_MANAGE: "Manage timetables.",
     PermissionName.ANNOUNCEMENT_READ: "View announcements.",
@@ -169,6 +171,7 @@ _PERSONA_ONLY = frozenset(
         P.PARENT_READ_CHILD,
         P.FACULTY_READ_SELF,
         P.FACULTY_READ_ASSIGNED_STUDENTS,
+        P.ASSIGNMENT_SUBMIT,
     }
 )
 
@@ -199,7 +202,7 @@ ROLE_PERMISSIONS: dict[RoleName, frozenset[PermissionName]] = {
         P.ASSIGNMENT_MANAGE,
     },
     RoleName.PARENT: _AUTH_BASE | _PERSONA_READ | {P.PARENT_READ_SELF, P.PARENT_READ_CHILD},
-    RoleName.STUDENT: _AUTH_BASE | _PERSONA_READ | {P.STUDENT_READ_SELF},
+    RoleName.STUDENT: _AUTH_BASE | _PERSONA_READ | {P.STUDENT_READ_SELF, P.ASSIGNMENT_SUBMIT},
 }
 
 # Which roles each role may grant or revoke (anti-privilege-escalation).

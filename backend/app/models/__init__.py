@@ -5,6 +5,14 @@ autogenerates migrations.
 """
 
 from app.models.academic import AcademicYear, SchoolClass, Section, Subject
+from app.models.assignments import (
+    Assignment,
+    AssignmentLifecycle,
+    AssignmentReviewChange,
+    AssignmentSubmission,
+    AssignmentSubmissionRevision,
+    SubmissionStatus,
+)
 from app.models.attendance import (
     AttendanceRecord,
     AttendanceRecordChange,
@@ -45,7 +53,12 @@ from app.models.user import User, UserStatus
 
 __all__ = [
     "AcademicYear",
+    "Assignment",
+    "AssignmentLifecycle",
+    "AssignmentReviewChange",
     "AssignmentStatus",
+    "AssignmentSubmission",
+    "AssignmentSubmissionRevision",
     "AttendanceRecord",
     "AttendanceRecordChange",
     "AttendanceSession",
@@ -86,6 +99,7 @@ __all__ = [
     "StudentParent",
     "StudentStatus",
     "Subject",
+    "SubmissionStatus",
     "TimestampMixin",
     "UUIDPrimaryKeyMixin",
     "User",

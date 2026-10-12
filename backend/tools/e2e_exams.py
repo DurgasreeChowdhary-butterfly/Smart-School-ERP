@@ -171,6 +171,7 @@ CLEANUP = """
 BEGIN;
 SET LOCAL app.exam_history_purge = 'on';
 SET LOCAL app.attendance_history_purge = 'on';
+SET LOCAL app.assignment_history_purge = 'on';
 CREATE TEMP TABLE e2e_s ON COMMIT DROP AS SELECT id FROM schools WHERE {run_schools};
 CREATE TEMP TABLE e2e_u ON COMMIT DROP AS
     SELECT id FROM users WHERE school_id IN (SELECT id FROM e2e_s);
@@ -183,6 +184,10 @@ DELETE FROM schools WHERE id IN (SELECT id FROM e2e_s);
 COMMIT;
 """
 SCHOOL_TABLES = (
+    "assignment_review_changes",
+    "assignment_submission_revisions",
+    "assignment_submissions",
+    "assignments",
     "exam_report_cards",
     "exam_publications",
     "exam_mark_changes",

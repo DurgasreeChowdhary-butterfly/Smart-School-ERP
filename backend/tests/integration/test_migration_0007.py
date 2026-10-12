@@ -126,8 +126,10 @@ def test_0007_upgrade_downgrade_reupgrade_preserves_data(connection: Connection)
     for function in FUNCTIONS:
         assert not _count(connection, "SELECT count(*) FROM pg_proc WHERE proname = :f", f=function)
 
-    command.upgrade(cfg, "head")
+    # Compare at this revision: later migrations may legitimately add catalog rows.
+    command.upgrade(cfg, "0007_examinations_marks")
     assert _snapshot(connection, school) == before
+    command.upgrade(cfg, "head")
     constraints = set(
         connection.execute(
             text(

@@ -549,3 +549,150 @@ class ExamWorld:
 @pytest.fixture
 def eworld(aworld: AttendanceWorld) -> ExamWorld:
     return ExamWorld(aworld)
+
+
+# ======================================================================== assignments
+def iso_in(days: float) -> str:
+    """An absolute instant ``days`` from now (UTC, with offset)."""
+    from datetime import UTC, datetime, timedelta
+
+    return (datetime.now(UTC) + timedelta(days=days)).isoformat()
+
+
+def today_iso() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).date().isoformat()
+
+
+@dataclass
+class HomeworkWorld:
+    """``aworld`` plus assignment helpers (test schools use the UTC time zone).
+
+    F teaches math_a in section_a, G sci_a in section_a, H math_a in section_a_b.
+    Students a1, a2 (section_a, with logins), ab (section_a_b), c2 (class2_a), b (school B).
+    """
+
+    a: AttendanceWorld
+
+    @property
+    def client(self) -> TestClient:
+        return self.a.client
+
+    @property
+    def admin(self) -> dict[str, str]:
+        return self.a.admin
+
+    @property
+    def ids(self) -> dict[str, str]:
+        return self.a.w.ids
+
+    def sid(self, key: str) -> str:
+        return self.a.sid(key)
+
+    def body(
+        self,
+        *,
+        year: str = "year_a",
+        cls: str = "class_a",
+        sec: str = "section_a",
+        subject: str = "math_a",
+        **extra: Any,
+    ) -> dict[str, Any]:
+        return {
+            "academic_year_id": self.ids[year],
+            "class_id": self.ids[cls],
+            "section_id": self.ids[sec],
+            "subject_id": self.ids[subject],
+            "title": "Chapter 3 exercises",
+            "instructions": "Solve questions 1-10.",
+            "assigned_on": today_iso(),
+            "due_at": iso_in(7),
+            **extra,
+        }
+
+    def create(self, headers: dict[str, str] | None = None, **kwargs: Any) -> Any:
+        return self.client.post(
+            f"{API}/assignments", headers=headers or self.admin, json=self.body(**kwargs)
+        )
+
+    def create_id(self, headers: dict[str, str] | None = None, **kwargs: Any) -> str:
+        response = self.create(headers, **kwargs)
+        assert response.status_code == 201, response.text
+        return str(response.json()["id"])
+
+    def action(self, assignment_id: str, verb: str, headers: dict[str, str] | None = None) -> Any:
+        return self.client.post(
+            f"{API}/assignments/{assignment_id}/{verb}", headers=headers or self.admin
+        )
+
+    def published(self, headers: dict[str, str] | None = None, **kwargs: Any) -> str:
+        assignment_id = self.create_id(headers, **kwargs)
+        response = self.action(assignment_id, "publish", headers)
+        assert response.status_code == 200, response.text
+        return assignment_id
+
+    def patch(
+        self, assignment_id: str, body: dict[str, Any], headers: dict[str, str] | None = None
+    ) -> Any:
+        return self.client.patch(
+            f"{API}/assignments/{assignment_id}", headers=headers or self.admin, json=body
+        )
+
+    def submit(
+        self, assignment_id: str, headers: dict[str, str], content: str = "My answers"
+    ) -> Any:
+        return self.client.post(
+            f"{API}/assignments/{assignment_id}/submissions",
+            headers=headers,
+            json={"content": content},
+        )
+
+    def submission_id(
+        self, assignment_id: str, headers: dict[str, str], content: str = "Work"
+    ) -> str:
+        response = self.submit(assignment_id, headers, content)
+        assert response.status_code == 201, response.text
+        return str(response.json()["id"])
+
+    def resubmit(self, submission_id: str, headers: dict[str, str], content: str = "Better") -> Any:
+        return self.client.post(
+            f"{API}/assignment-submissions/{submission_id}/revisions",
+            headers=headers,
+            json={"content": content},
+        )
+
+    def review(self, submission_id: str, headers: dict[str, str] | None = None, **body: Any) -> Any:
+        return self.client.put(
+            f"{API}/assignment-submissions/{submission_id}/review",
+            headers=headers or self.admin,
+            json=body,
+        )
+
+    def get(self, path: str, headers: dict[str, str] | None = None, **params: Any) -> Any:
+        return self.client.get(f"{API}{path}", headers=headers or self.admin, params=params)
+
+    def items(self, path: str, headers: dict[str, str] | None = None, **params: Any) -> list[Any]:
+        response = self.get(path, headers, **params)
+        assert response.status_code == 200, response.text
+        return list(response.json()["items"])
+
+    def student(self, adm: str) -> dict[str, str]:
+        return self.a.w.student_headers(adm)
+
+    def new_student(
+        self, adm: str, *, sec: str = "section_a", date: str = "2026-06-10"
+    ) -> tuple[str, str, dict[str, str]]:
+        """(student id, enrollment id, headers) for a new student with a login."""
+        student_id = self.a.w.student(adm, password=STUDENT_PASSWORD).json()["id"]
+        response = self.a.w.enroll(student_id, sec=sec, date=date)
+        assert response.status_code == 201, response.text
+        return student_id, response.json()["id"], self.student(adm)
+
+    def parent_of(self, *students: str) -> dict[str, str]:
+        return self.a.parent_of(*students)
+
+
+@pytest.fixture
+def hworld(aworld: AttendanceWorld) -> HomeworkWorld:
+    return HomeworkWorld(aworld)

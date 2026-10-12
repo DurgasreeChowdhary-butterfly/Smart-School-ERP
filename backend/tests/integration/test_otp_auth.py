@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -244,7 +245,11 @@ def test_request_validation(
 def test_verify_validation(db_client: TestClient, code: str) -> None:
     response = _verify(db_client, code)
     assert response.status_code == 422
-    assert code not in response.text or code == ""
+    # The rejected code is never echoed back. Ignore only the random request id, which
+    # can contain the digits by chance.
+    body = response.json()
+    assert body["error"].pop("request_id")
+    assert code not in json.dumps(body) or code == ""
 
 
 def test_verify_without_request_fails(db_client: TestClient, parent: Any) -> None:
